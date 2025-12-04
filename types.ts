@@ -11,6 +11,10 @@ export interface Album {
   reviewUrl?: string;
   spotifyUrl?: string;
   rymUrl?: string;
+  // New Last.fm fields
+  description?: string;
+  listeners?: string;
+  playcount?: string;
 }
 
 export interface ChartData {

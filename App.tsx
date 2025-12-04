@@ -4,9 +4,10 @@ import { ImportModal } from './components/ImportModal';
 import { SettingsModal } from './components/SettingsModal';
 import { StatsDashboard } from './components/StatsDashboard';
 import { AIChatPanel } from './components/AIChatPanel';
+import { AlbumDetailsModal } from './components/AlbumDetailsModal';
 import { 
   Search, Plus, Sparkles, Filter, Music, Disc, Star, Calendar, Tag, Trash2, ArrowUpDown, 
-  LayoutGrid, List as ListIcon, PlayCircle, Wand2, RefreshCw, Globe, ChevronDown, FileText, Settings
+  LayoutGrid, List as ListIcon, PlayCircle, Wand2, RefreshCw, Globe, ChevronDown, FileText, Settings, Eye
 } from 'lucide-react';
 
 const INITIAL_DATA: Album[] = [
@@ -52,8 +53,11 @@ function App() {
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
   const [isFetchingCovers, setIsFetchingCovers] = useState(false);
   
-  // Settings State
-  const [lastFmKey, setLastFmKey] = useState(() => localStorage.getItem('sonic_lastfm_key') || '');
+  // Selection State for Details Modal
+  const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
+  
+  // Settings State - Default to provided key
+  const [lastFmKey, setLastFmKey] = useState(() => localStorage.getItem('sonic_lastfm_key') || '35d1f37f24cae4311b13d6d0e4fa41fd');
   
   const [filter, setFilter] = useState<FilterState>({ 
     search: '', 
@@ -79,39 +83,57 @@ function App() {
     return Array.from(tags).sort();
   }, [albums]);
 
-  // Smart Fetch: Tries Last.fm first (if key exists), then iTunes
+  // Smart Fetch: Tries Last.fm (Metadata + Cover) first, then iTunes (Cover only)
   const fetchCovers = async (specificAlbums?: Album[]) => {
     setIsFetchingCovers(true);
     
+    // Process all albums that don't have a description OR don't have a cover
     const candidates = specificAlbums || albums;
-    const albumsToUpdate = candidates.filter(a => !a.coverUrl);
+    const albumsToUpdate = candidates.filter(a => !a.coverUrl || !a.description);
     
     if (albumsToUpdate.length === 0) {
-      if (!specificAlbums) alert("All albums already have covers!");
+      if (!specificAlbums) alert("All albums are fully updated!");
       setIsFetchingCovers(false);
       return;
     }
 
     for (const album of albumsToUpdate) {
-      let foundUrl: string | null = null;
+      let newData: Partial<Album> = {};
       let source = '';
 
       // 1. Try Last.fm if Key is present
-      if (lastFmKey && !foundUrl) {
+      if (lastFmKey) {
         try {
-          const res = await fetch(`https://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=${lastFmKey}&artist=${encodeURIComponent(album.artist)}&album=${encodeURIComponent(album.title)}&format=json`);
+          const res = await fetch(`https://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=${lastFmKey}&artist=${encodeURIComponent(album.artist)}&album=${encodeURIComponent(album.title)}&format=json&autocorrect=1`);
           const data = await res.json();
-          if (data.album && data.album.image) {
-            // Priority: mega > extralarge > large
-            const images = data.album.image;
-            const imgObj = 
-              images.find((i: any) => i.size === 'mega') || 
-              images.find((i: any) => i.size === 'extralarge') || 
-              images.find((i: any) => i.size === 'large');
+          if (data.album) {
+            source = 'Last.fm';
             
-            if (imgObj && imgObj['#text']) {
-              foundUrl = imgObj['#text'];
-              source = 'Last.fm';
+            // Get Cover
+            if (!album.coverUrl && data.album.image) {
+              const images = data.album.image;
+              const imgObj = 
+                images.find((i: any) => i.size === 'mega') || 
+                images.find((i: any) => i.size === 'extralarge') || 
+                images.find((i: any) => i.size === 'large');
+              if (imgObj && imgObj['#text']) newData.coverUrl = imgObj['#text'];
+            }
+
+            // Get Description (Wiki)
+            if (data.album.wiki && data.album.wiki.summary) {
+              newData.description = data.album.wiki.summary;
+            }
+
+            // Get Stats
+            if (data.album.listeners) newData.listeners = data.album.listeners;
+            if (data.album.playcount) newData.playcount = data.album.playcount;
+            
+            // Append top tag if tags are empty
+            if (album.tags.length === 0 && data.album.tags && data.album.tags.tag) {
+               const fmTags = Array.isArray(data.album.tags.tag) 
+                 ? data.album.tags.tag.slice(0, 3).map((t: any) => t.name) 
+                 : [data.album.tags.tag.name];
+               newData.tags = fmTags;
             }
           }
         } catch (e) {
@@ -119,30 +141,30 @@ function App() {
         }
       }
 
-      // 2. Fallback to iTunes if Last.fm failed or no key
-      if (!foundUrl) {
+      // 2. Fallback to iTunes for Cover if Last.fm failed to find one
+      if (!newData.coverUrl && !album.coverUrl) {
         try {
           const query = encodeURIComponent(`${album.artist} ${album.title}`);
           const response = await fetch(`https://itunes.apple.com/search?term=${query}&entity=album&limit=1`);
           const data = await response.json();
 
           if (data.results && data.results.length > 0) {
-            foundUrl = data.results[0].artworkUrl100?.replace('100x100bb', '600x600bb');
-            source = 'iTunes';
+            newData.coverUrl = data.results[0].artworkUrl100?.replace('100x100bb', '600x600bb');
+            if (!source) source = 'iTunes';
           }
         } catch (error) {
           console.error(`iTunes fetch failed for ${album.title}`, error);
         }
       }
 
-      // 3. Update state if found
-      if (foundUrl) {
-        setAlbums(prev => prev.map(a => a.id === album.id ? { ...a, coverUrl: foundUrl! } : a));
+      // 3. Update state if found anything
+      if (Object.keys(newData).length > 0) {
+        setAlbums(prev => prev.map(a => a.id === album.id ? { ...a, ...newData } : a));
         console.log(`Updated ${album.title} via ${source}`);
       }
 
       // Rate limiting delay
-      await new Promise(r => setTimeout(r, 250)); 
+      await new Promise(r => setTimeout(r, 200)); 
     }
 
     setIsFetchingCovers(false);
@@ -156,6 +178,7 @@ function App() {
   const handleDelete = (id: string) => {
     if (confirm('Are you sure you want to delete this album?')) {
       setAlbums(prev => prev.filter(a => a.id !== id));
+      if (selectedAlbum?.id === id) setSelectedAlbum(null);
     }
   };
 
@@ -261,7 +284,7 @@ function App() {
                      <Wand2 size={16} className="text-indigo-400" />
                    )}
                    <span className="hidden sm:inline text-xs font-bold text-slate-300 group-hover:text-white uppercase tracking-wider">
-                     {isFetchingCovers ? 'Fetching...' : 'Fetch Covers'}
+                     {isFetchingCovers ? 'Fetching...' : 'Fetch Metadata'}
                    </span>
                 </div>
               </button>
@@ -414,7 +437,7 @@ function App() {
                     <tbody className="divide-y divide-white/5">
                       {filteredAlbums.length > 0 ? (
                         filteredAlbums.map((album) => (
-                          <tr key={album.id} className="group hover:bg-white/5 transition-colors duration-200">
+                          <tr key={album.id} className="group hover:bg-white/5 transition-colors duration-200 cursor-pointer" onClick={() => setSelectedAlbum(album)}>
                             <td className="p-5 font-bold text-white group-hover:text-indigo-300 transition-colors">
                               {album.artist}
                             </td>
@@ -461,21 +484,21 @@ function App() {
                               </div>
                             </td>
                             <td className="p-5 text-right">
-                              <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setSelectedAlbum(album); }}
+                                  className="p-2 text-slate-400 hover:text-indigo-400 hover:bg-indigo-400/10 rounded-lg transition-all"
+                                >
+                                  <Eye size={16} />
+                                </button>
                                 <a 
                                   href={getSpotifyLink(album)} target="_blank" rel="noopener noreferrer"
                                   className="p-2 text-slate-400 hover:text-green-400 hover:bg-green-400/10 rounded-lg transition-all"
                                 >
                                   <PlayCircle size={16} />
                                 </a>
-                                <a 
-                                  href={getRymLink(album)} target="_blank" rel="noopener noreferrer"
-                                  className="p-2 text-slate-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
-                                >
-                                  <Globe size={16} />
-                                </a>
                                 <button 
-                                  onClick={() => handleDelete(album.id)}
+                                  onClick={(e) => { e.stopPropagation(); handleDelete(album.id); }}
                                   className="p-2 text-slate-400 hover:text-rose-400 hover:bg-rose-400/10 rounded-lg transition-all"
                                 >
                                   <Trash2 size={16} />
@@ -496,7 +519,11 @@ function App() {
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-6">
                 {filteredAlbums.length > 0 ? (
                   filteredAlbums.map(album => (
-                    <div key={album.id} className="group relative rounded-2xl transition-all duration-500 hover:-translate-y-2">
+                    <div 
+                      key={album.id} 
+                      className="group relative rounded-2xl transition-all duration-500 hover:-translate-y-2 cursor-pointer"
+                      onClick={() => setSelectedAlbum(album)}
+                    >
                       
                       {/* Card Content */}
                       <div className="glass-card rounded-2xl overflow-hidden h-full flex flex-col relative z-10">
@@ -534,7 +561,7 @@ function App() {
 
                           {/* Hover Actions Overlay */}
                           <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col items-center justify-center gap-3">
-                             <div className="flex gap-3 transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300">
+                             <div className="flex gap-3 transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300" onClick={e => e.stopPropagation()}>
                                 <a href={getSpotifyLink(album)} target="_blank" rel="noopener noreferrer" className="p-3 bg-green-500 rounded-full text-white hover:scale-110 transition-transform shadow-xl hover:bg-green-400">
                                   <PlayCircle size={20} fill="currentColor" />
                                 </a>
@@ -545,9 +572,12 @@ function App() {
                                   <FileText size={20} />
                                 </a>
                              </div>
-                             <button onClick={() => handleDelete(album.id)} className="mt-4 text-xs text-rose-400 hover:text-rose-300 font-medium flex items-center gap-1 hover:underline">
+                             <button onClick={(e) => { e.stopPropagation(); handleDelete(album.id); }} className="mt-4 text-xs text-rose-400 hover:text-rose-300 font-medium flex items-center gap-1 hover:underline">
                                <Trash2 size={12} /> Remove
                              </button>
+                             <div className="absolute bottom-4 text-xs font-bold text-white uppercase tracking-widest border border-white/20 px-3 py-1 rounded-full bg-white/10 backdrop-blur">
+                                View Details
+                             </div>
                           </div>
                         </div>
 
@@ -599,6 +629,10 @@ function App() {
         onClose={() => setIsSettingsOpen(false)} 
         apiKey={lastFmKey} 
         onSave={(k) => setLastFmKey(k)} 
+      />
+      <AlbumDetailsModal 
+        album={selectedAlbum} 
+        onClose={() => setSelectedAlbum(null)} 
       />
       
       {/* Chat Overlay */}
