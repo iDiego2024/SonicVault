@@ -1,11 +1,12 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Album, FilterState, SortField, SortOrder } from './types';
 import { ImportModal } from './components/ImportModal';
+import { SettingsModal } from './components/SettingsModal';
 import { StatsDashboard } from './components/StatsDashboard';
 import { AIChatPanel } from './components/AIChatPanel';
 import { 
   Search, Plus, Sparkles, Filter, Music, Disc, Star, Calendar, Tag, Trash2, ArrowUpDown, 
-  LayoutGrid, List as ListIcon, PlayCircle, Wand2, RefreshCw, Globe, ChevronDown, FileText
+  LayoutGrid, List as ListIcon, PlayCircle, Wand2, RefreshCw, Globe, ChevronDown, FileText, Settings
 } from 'lucide-react';
 
 const INITIAL_DATA: Album[] = [
@@ -47,8 +48,12 @@ function App() {
   const [albums, setAlbums] = useState<Album[]>(INITIAL_DATA);
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
   const [isFetchingCovers, setIsFetchingCovers] = useState(false);
+  
+  // Settings State
+  const [lastFmKey, setLastFmKey] = useState(() => localStorage.getItem('sonic_lastfm_key') || '');
   
   const [filter, setFilter] = useState<FilterState>({ 
     search: '', 
@@ -57,6 +62,11 @@ function App() {
     tag: ''
   });
   const [sort, setSort] = useState<{ field: SortField; order: SortOrder }>({ field: 'artist', order: 'asc' });
+
+  // Save key when updated
+  useEffect(() => {
+    localStorage.setItem('sonic_lastfm_key', lastFmKey);
+  }, [lastFmKey]);
 
   // Extract unique values for filters
   const uniqueYears = useMemo(() => {
@@ -69,12 +79,10 @@ function App() {
     return Array.from(tags).sort();
   }, [albums]);
 
-  // Uses iTunes Search API to find album covers
-  // If specificAlbums is provided, only fetch for those. Otherwise, check all missing.
+  // Smart Fetch: Tries Last.fm first (if key exists), then iTunes
   const fetchCovers = async (specificAlbums?: Album[]) => {
     setIsFetchingCovers(true);
     
-    // If specific list provided (e.g. from import), use that. Otherwise use full state.
     const candidates = specificAlbums || albums;
     const albumsToUpdate = candidates.filter(a => !a.coverUrl);
     
@@ -84,27 +92,57 @@ function App() {
       return;
     }
 
-    // We process sequentially to be nice to the API rate limits
     for (const album of albumsToUpdate) {
-      try {
-        const query = encodeURIComponent(`${album.artist} ${album.title}`);
-        const response = await fetch(`https://itunes.apple.com/search?term=${query}&entity=album&limit=1`);
-        const data = await response.json();
+      let foundUrl: string | null = null;
+      let source = '';
 
-        if (data.results && data.results.length > 0) {
-          const result = data.results[0];
-          // Get higher resolution image (600x600)
-          const highResUrl = result.artworkUrl100?.replace('100x100bb', '600x600bb');
-          
-          if (highResUrl) {
-            setAlbums(prev => prev.map(a => a.id === album.id ? { ...a, coverUrl: highResUrl } : a));
+      // 1. Try Last.fm if Key is present
+      if (lastFmKey && !foundUrl) {
+        try {
+          const res = await fetch(`https://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=${lastFmKey}&artist=${encodeURIComponent(album.artist)}&album=${encodeURIComponent(album.title)}&format=json`);
+          const data = await res.json();
+          if (data.album && data.album.image) {
+            // Priority: mega > extralarge > large
+            const images = data.album.image;
+            const imgObj = 
+              images.find((i: any) => i.size === 'mega') || 
+              images.find((i: any) => i.size === 'extralarge') || 
+              images.find((i: any) => i.size === 'large');
+            
+            if (imgObj && imgObj['#text']) {
+              foundUrl = imgObj['#text'];
+              source = 'Last.fm';
+            }
           }
+        } catch (e) {
+          console.warn(`Last.fm fetch failed for ${album.title}`, e);
         }
-      } catch (error) {
-        console.error(`Could not fetch cover for ${album.title}`, error);
       }
-      // Small delay to prevent rate limiting
-      await new Promise(r => setTimeout(r, 200)); 
+
+      // 2. Fallback to iTunes if Last.fm failed or no key
+      if (!foundUrl) {
+        try {
+          const query = encodeURIComponent(`${album.artist} ${album.title}`);
+          const response = await fetch(`https://itunes.apple.com/search?term=${query}&entity=album&limit=1`);
+          const data = await response.json();
+
+          if (data.results && data.results.length > 0) {
+            foundUrl = data.results[0].artworkUrl100?.replace('100x100bb', '600x600bb');
+            source = 'iTunes';
+          }
+        } catch (error) {
+          console.error(`iTunes fetch failed for ${album.title}`, error);
+        }
+      }
+
+      // 3. Update state if found
+      if (foundUrl) {
+        setAlbums(prev => prev.map(a => a.id === album.id ? { ...a, coverUrl: foundUrl! } : a));
+        console.log(`Updated ${album.title} via ${source}`);
+      }
+
+      // Rate limiting delay
+      await new Promise(r => setTimeout(r, 250)); 
     }
 
     setIsFetchingCovers(false);
@@ -112,7 +150,6 @@ function App() {
 
   const handleImport = (newAlbums: Album[]) => {
     setAlbums(prev => [...prev, ...newAlbums]);
-    // Automatically trigger fetch for the new imports
     fetchCovers(newAlbums);
   };
 
@@ -243,6 +280,14 @@ function App() {
               >
                 <Sparkles size={16} fill="currentColor" />
                 <span className="hidden sm:inline text-xs font-bold uppercase tracking-wider">Ask AI</span>
+              </button>
+
+              <button
+                onClick={() => setIsSettingsOpen(true)}
+                className="p-2.5 bg-slate-800/50 hover:bg-slate-700/50 text-slate-400 hover:text-indigo-300 rounded-xl transition-all border border-slate-700 hover:border-indigo-500/50"
+                title="Settings"
+              >
+                <Settings size={18} />
               </button>
             </div>
           </div>
@@ -549,6 +594,12 @@ function App() {
 
       {/* Modals */}
       <ImportModal isOpen={isImportOpen} onClose={() => setIsImportOpen(false)} onImport={handleImport} />
+      <SettingsModal 
+        isOpen={isSettingsOpen} 
+        onClose={() => setIsSettingsOpen(false)} 
+        apiKey={lastFmKey} 
+        onSave={(k) => setLastFmKey(k)} 
+      />
       
       {/* Chat Overlay */}
       <div className={`fixed inset-0 z-40 bg-black/60 backdrop-blur-sm transition-opacity duration-300 md:hidden ${isChatOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setIsChatOpen(false)} />
